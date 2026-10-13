@@ -6,7 +6,7 @@ import (
 	"github.com/skat/tob-ratelimit/internal/bucket"
 )
 
-// Rule is one rate-limit layer to enforce for a request.
+// Rule is a resolved limit layer for one request.
 type Rule struct {
 	Tier   Tier
 	Key    string
@@ -23,8 +23,10 @@ func NewResolver(cfg Config) *Resolver {
 	return &Resolver{cfg: cfg}
 }
 
-// Resolve returns ordered rules: block/crawler → endpoint → anonymous or user.
+// Resolve returns ordered rules from strictest applicable layers.
+// Order: block/crawler IP → endpoint → anonymous device → authenticated user.
 func (r *Resolver) Resolve(id Identity) []Rule {
+	var rules []Rule
 	endpoint := normalizeEndpoint(id.Endpoint)
 	prefix := r.cfg.RedisKeyPrefix
 	if prefix == "" {
@@ -34,17 +36,15 @@ func (r *Resolver) Resolve(id Identity) []Rule {
 	if _, blocked := r.cfg.BlockedIPs[id.IP]; blocked {
 		return []Rule{{
 			Tier:   TierBlock,
-			Key:    buildKey(prefix, TierBlock, "ip:"+id.IP, endpoint),
+			Key:    key(prefix, TierBlock, id.IP, endpoint),
 			Params: bucket.Params{Capacity: 0, Rate: 0, Weight: 1},
 		}}
 	}
 
-	var rules []Rule
-
 	if _, crawler := r.cfg.CrawlerIPs[id.IP]; crawler {
 		rules = append(rules, Rule{
 			Tier:   TierCrawler,
-			Key:    buildKey(prefix, TierCrawler, "ip:"+id.IP, endpoint),
+			Key:    key(prefix, TierCrawler, id.IP, endpoint),
 			Params: toParams(r.cfg.Crawler),
 		})
 		if !id.IsAuthenticated() {
@@ -59,7 +59,7 @@ func (r *Resolver) Resolve(id Identity) []Rule {
 		scopeID := scopeIdentity(ep.IdentityScope, id)
 		rules = append(rules, Rule{
 			Tier:   TierEndpoint,
-			Key:    buildKey(prefix, TierEndpoint, scopeID, ep.Pattern),
+			Key:    key(prefix, TierEndpoint, scopeID, ep.Pattern),
 			Params: toParams(ep.Params),
 		})
 	}
@@ -67,7 +67,7 @@ func (r *Resolver) Resolve(id Identity) []Rule {
 	if id.IsAuthenticated() {
 		rules = append(rules, Rule{
 			Tier:   TierUser,
-			Key:    buildKey(prefix, TierUser, id.UserID, endpoint),
+			Key:    key(prefix, TierUser, id.UserID, endpoint),
 			Params: toParams(r.cfg.User),
 		})
 		return rules
@@ -79,13 +79,13 @@ func (r *Resolver) Resolve(id Identity) []Rule {
 	}
 	rules = append(rules, Rule{
 		Tier:   TierAnonymous,
-		Key:    buildKey(prefix, TierAnonymous, identity, endpoint),
+		Key:    key(prefix, TierAnonymous, identity, endpoint),
 		Params: toParams(r.cfg.Anonymous),
 	})
 	return rules
 }
 
-func buildKey(prefix string, tier Tier, identity, endpoint string) string {
+func key(prefix string, tier Tier, identity, endpoint string) string {
 	ep := sanitize(endpoint)
 	if ep == "" {
 		ep = "global"
@@ -97,16 +97,6 @@ func sanitize(s string) string {
 	s = strings.TrimSpace(s)
 	s = strings.ReplaceAll(s, " ", "_")
 	return s
-}
-
-func normalizeEndpoint(path string) string {
-	if path == "" {
-		return "/"
-	}
-	if !strings.HasPrefix(path, "/") {
-		return "/" + path
-	}
-	return path
 }
 
 func matchEndpoint(path, pattern string) bool {
@@ -127,20 +117,30 @@ func scopeIdentity(scope string, id Identity) string {
 	switch scope {
 	case "device":
 		if id.DeviceID != "" {
-			return "dev:" + id.DeviceID
+			return id.DeviceID
 		}
-		return "ip:" + id.IP
+		return id.IP
 	case "user":
 		if id.UserID != "" {
-			return "usr:" + id.UserID
+			return id.UserID
 		}
 		if id.DeviceID != "" {
-			return "dev:" + id.DeviceID
+			return id.DeviceID
 		}
-		return "ip:" + id.IP
+		return id.IP
 	default:
-		return "ip:" + id.IP
+		return id.IP
 	}
+}
+
+func normalizeEndpoint(path string) string {
+	if path == "" {
+		return "/"
+	}
+	if !strings.HasPrefix(path, "/") {
+		return "/" + path
+	}
+	return path
 }
 
 func toParams(p BucketParams) bucket.Params {

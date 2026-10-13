@@ -31,16 +31,18 @@ func New(cfg Config, client *goredis.Client) *Limiter {
 		cfg.CrawlerIPs = make(map[string]struct{})
 	}
 	scale := cfg.LocalFallbackScale
-	if scale <= 0 || scale > 1 {
+	if client == nil {
+		scale = 1.0
+	} else if scale <= 0 || scale > 1 {
 		scale = 0.5
 	}
 
 	var store bucket.Bucket
-	fallbackLocal := bucket.NewLocal(scale)
+	local := bucket.NewLocal(scale)
 	if client != nil {
-		store = bucket.NewFallback(bucket.NewRedis(client), fallbackLocal)
+		store = bucket.NewFallback(bucket.NewRedis(client), local)
 	} else {
-		store = bucket.NewLocal(1) // full quota when Redis is not configured
+		store = local
 	}
 
 	batchCfg := detector.BatchConfig{
@@ -48,15 +50,13 @@ func New(cfg Config, client *goredis.Client) *Limiter {
 		Threshold: cfg.BatchThreshold,
 		MaxFactor: 10,
 	}
-	var det detector.Detector
 	localDet := detector.NewLocal(batchCfg)
+	var det detector.Detector = localDet
 	if client != nil {
 		det = detector.NewFallback(
 			detector.NewRedis(client, cfg.RedisKeyPrefix+":", batchCfg),
 			localDet,
 		)
-	} else {
-		det = localDet
 	}
 
 	return &Limiter{
@@ -96,10 +96,6 @@ func (l *Limiter) Allow(ctx context.Context, id Identity) (Result, error) {
 		}
 
 		if !res.Allowed {
-			reason := string(rule.Tier) + "_rate_exceeded"
-			if rule.Tier == layer.TierBlock {
-				reason = "ip_blocked"
-			}
 			return Result{
 				Allowed:    false,
 				Tier:       fromLayerTier(rule.Tier),
@@ -107,7 +103,7 @@ func (l *Limiter) Allow(ctx context.Context, id Identity) (Result, error) {
 				Remaining:  res.Remaining,
 				RetryAfter: res.RetryAfter,
 				Key:        rule.Key,
-				Reason:     reason,
+				Reason:     string(rule.Tier) + "_rate_exceeded",
 			}, nil
 		}
 	}

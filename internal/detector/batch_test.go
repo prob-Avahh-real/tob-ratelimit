@@ -60,4 +60,7 @@ func TestCostFactorCap(t *testing.T) {
 	if res.CostFactor > 3 {
 		t.Fatalf("cost factor should cap at MaxFactor, got %v", res.CostFactor)
 	}
+	if !res.Abusive {
+		t.Fatal("expected abusive at count 100")
+	}
 }
